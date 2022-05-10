@@ -1,0 +1,125 @@
+name: CI
+on: push
+jobs:
+  my-job:
+    runs-on: self-hosted
+    steps:
+      - env:
+          MY_PAT: ${{ secrets.MY_PAT }}
+        run: |
+          # Invoke the REST API: Get a registration token
+          token_file=token-response.json
+          rm "$token_file" 1>/dev/null 2>&1 || :
+          auth="Authorization: bearer $MY_PAT"
+          url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runners/registration-token"
+          code=$(curl --silent --show-error --write-out '%{http_code}' --output "$token_file" --header "$auth" --request POST "$url")
+          echo "HTTP code $code"
+          if [[ "$code" != '201' ]]; then
+            cat "$token_file" || :
+            exit 1
+          fi
+          token="$(cat "$token_file" | jq --raw-output '.token')"
+          echo "::add-mask::$token"
+          cat "$token_file"
+
+          # Determine os/arch
+          if [[ "$RUNNER_OS" == 'Linux' ]]; then
+            os=linux
+            arch=x64
+          elif [[ "$RUNNER_OS" == 'macOS' ]]; then
+            os=osx
+            arch=x64
+          else
+            echo "Unexpected RUNNER_OS '$RUNNER_OS'"
+            exit 1
+          fi
+
+          # Invoke the REST API: Get runner downloads
+          downloads_file=downloads-response.json
+          rm "$downloads_file" 1>/dev/null 2>&1 || :
+          url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runners/downloads"
+          code=$(curl --silent --show-error --write-out '%{http_code}' --output "$downloads_file" --header "$auth" --request GET "$url")
+          cat "$downloads_file" || :
+          echo "HTTP code $code"
+          if [[ "$code" != '200' ]]; then
+            exit 1
+          fi
+          url="$(cat "$downloads_file" | jq --raw-output ".[] | select(.os==\"$os\" and .architecture==\"$arch\") | .download_url")"
+          temp_download_token="$(cat "$downloads_file" | jq --raw-output ".[] | select(.os==\"$os\" and .architecture==\"$arch\") | .temp_download_token // empty")"
+          echo "Download url is '$url'"
+          
+          download_auth="$auth"
+          if [ -n "$temp_download_token" ]; then
+            echo "Found a vssf temp download token, will use that when downloading rather than github token"
+            download_auth="Authorization: bearer $temp_download_token"
+          fi
+          
+          # Download the runner
+          runner_file=runner.tar.gz
+          rm "$runner_file" 1>/dev/null 2>&1 || :
+          code=$(curl --location --silent --show-error --write-out '%{http_code}' --output "$runner_file" --header "$download_auth" --request GET "$url")
+          echo "HTTP code $code"
+          if [[ "$code" != '200' ]]; then
+            exit 1
+          fi
+          
+          # Register the runner
+          runner_dir=runner
+          rm -rf "$runner_dir" 1>/dev/null 2>&1 || :
+          mkdir "$runner_dir"
+          cd "$runner_dir"
+          tar xzf "../$runner_file"
+          runner_name="my_runner_$RANDOM"
+          ./config.sh --unattended --url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" --token "$token" --name "$runner_name"
+          cd ..
+          
+          # Invoke the REST API: Get runners
+          runners_file=runners-response.json
+          rm "$runners_file" 1>/dev/null 2>&1 || :
+          url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runners"
+          code=$(curl --silent --show-error --write-out '%{http_code}' --output "$runners_file" --header "$auth" --request GET "$url")
+          cat "$runners_file" || :
+          echo "HTTP code $code"
+          if [[ "$code" != '200' ]]; then
+            exit 1
+          fi
+          actual_runner="$(cat "$runners_file" | jq --raw-output ".runners | .[] | select(.name==\"$runner_name\") | .name")"
+          if [[ "$actual_runner" != "$runner_name" ]]; then
+            echo "Expected runner not found"
+            exit 1
+          fi
+          
+          # Invoke the REST API: Get a remove token
+          remove_token_file=remove-token-response.json
+          rm "$remove_token_file" 1>/dev/null 2>&1 || :
+          url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runners/remove-token"
+          code=$(curl --silent --show-error --write-out '%{http_code}' --output "$remove_token_file" --header "$auth" --request POST "$url")
+          echo "HTTP code $code"
+          if [[ "$code" != '201' ]]; then
+            cat "$remove_token_file" || :
+            exit 1
+          fi
+          remove_token="$(cat "$remove_token_file" | jq --raw-output '.token')"
+          echo "::add-mask::$remove_token"
+          cat "$remove_token_file"
+          
+          # Remove the runner
+          cd "$runner_dir"
+          ./config.sh remove --unattended --token "$remove_token"
+          cd ..
+          
+          # Invoke the REST API: Get runners
+          runners_file=runners-response.json
+          rm "$runners_file" 1>/dev/null 2>&1 || :
+          url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runners"
+          code=$(curl --silent --show-error --write-out '%{http_code}' --output "$runners_file" --header "$auth" --request GET "$url")
+          cat "$runners_file" || :
+          echo "HTTP code $code"
+          if [[ "$code" != '200' ]]; then
+            exit 1
+          fi
+          actual_runner="$(cat "$runners_file" | jq --raw-output ".runners | .[] | select(.name==\"$runner_name\") | .name")"
+          if [[ "$actual_runner" != "" ]]; then
+            echo "Runner not removed"
+            exit 1
+          fi
