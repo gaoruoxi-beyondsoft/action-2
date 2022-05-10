@@ -1,0 +1,53 @@
+name: CI
+on: push
+jobs:
+  job-1:
+    runs-on: self-hosted
+    steps:
+      - run: |
+          echo "123 * 456 = $(expr 123 \* 456)"
+  job-2:
+    needs: job-1
+    runs-on: self-hosted
+    steps:
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # Delete the output file (if previously created)
+          jobs_file=jobs-response.json
+          rm "$jobs_file" 1>/dev/null 2>&1 || :
+          
+          # Invoke the REST API
+          auth="Authorization: bearer $GITHUB_TOKEN"
+          url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs"
+          code=$(curl --silent --show-error --write-out '%{http_code}' --output "$jobs_file" --header "$auth" --request GET "$url")
+          
+          # Dump the response body
+          cat "$jobs_file" || :
+          
+          # Check the HTTP code
+          echo "HTTP code $code"
+          if [[ "$code" != '200' ]]; then
+            exit 1
+          fi
+          
+          # Get job-1 ID
+          job_id="$(cat "$jobs_file" | jq --raw-output '.jobs | .[] | select(.name=="job-1") | .id')"
+          echo "Job 'job-1' ID is '$job_id'"
+
+          # Delete the output file (if previously created)
+          log_file=logs.zip
+          rm "$log_file" 1>/dev/null 2>&1 || :
+
+          # Invoke the REST API
+          url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs"
+          code=$(curl --location --silent --show-error --write-out '%{http_code}' --output "$log_file" --header "$auth" --request GET "$url")
+          
+          # Check the HTTP code
+          echo "HTTP code $code"
+          if [[ "$code" != '200' ]]; then
+            exit 1
+          fi
+
+          # Grep the log
+          grep --recursive --fixed-strings "123 * 456 = 56088" "$log_file"
